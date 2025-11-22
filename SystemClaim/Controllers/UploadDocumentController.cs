@@ -7,7 +7,7 @@ using SystemClaim.Models;
 
 namespace SystemClaim.Controllers
 {
-    [Authorize(Roles = "HR, PM, CM")] // Adjust roles as needed
+    [Authorize(Roles = "HR,Lecturer")] // Adjust roles as needed
     public class UploadDocumentController : Controller
     {
         private readonly ApplicationDbContext _context;

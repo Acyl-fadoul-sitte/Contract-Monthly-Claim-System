@@ -1,5 +1,6 @@
 ﻿using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SystemClaim.Data;
@@ -9,21 +10,20 @@ namespace SystemClaim.Controllers
 {
     public class ClaimsController : Controller
     {
-
         private readonly ApplicationDbContext _context;
+        private readonly IWebHostEnvironment _webHostEnvironment;
 
-
-        public ClaimsController(ApplicationDbContext context)
+        public ClaimsController(ApplicationDbContext context, IWebHostEnvironment webHostEnvironment)
         {
-
             _context = context;
+            _webHostEnvironment = webHostEnvironment;
         }
+
+        // Show all claims for current user
         public async Task<IActionResult> Claims()
         {
-            // Get current logged-in user ID
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
-            // Fetch claims for this user
             var claims = await _context.Claims
                 .Where(c => c.WorkerUserId == userId)
                 .OrderByDescending(c => c.CreatedAt)
@@ -32,7 +32,7 @@ namespace SystemClaim.Controllers
             return View(claims);
         }
 
-
+        // GET: Create Claim
         [Authorize(Roles = "Lecturer")]
         public async Task<IActionResult> CreateClaim()
         {
@@ -47,39 +47,74 @@ namespace SystemClaim.Controllers
                 model.Surname = profile.Surname;
                 model.Department = profile.Department;
                 model.RatePerJob = profile.DefaultRatePerJob;
+                model.WorkerUserId = userId;   // IMPORTANT
             }
 
             return View(model);
         }
 
-
+        // POST: Create Claim + Upload File
         [HttpPost]
         [Authorize(Roles = "Lecturer")]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> CreateClaim(Claims claim)
+        public async Task<IActionResult> CreateClaim(Claims model, IFormFile file)
         {
-            claim.WorkerUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-            claim.TotalAmount = claim.RatePerJob * claim.NumberOfJobs;
-            claim.Status = "Submitted";
+            // Save the claim first
+            model.CreatedAt = DateTime.Now;
+            _context.Claims.Add(model);
+            await _context.SaveChangesAsync();
 
-            if (ModelState.IsValid)
+            // The claim now exists & has a real ID:
+            int claimId = model.Id;
+
+            // If a file was uploaded, save it
+            if (file != null && file.Length > 0)
             {
-                _context.Add(claim);
+                var uploadsFolder = Path.Combine(_webHostEnvironment.WebRootPath, "uploads");
+                if (!Directory.Exists(uploadsFolder))
+                    Directory.CreateDirectory(uploadsFolder);
+
+                var uniqueFile = $"{Guid.NewGuid()}_{file.FileName}";
+                var filePath = Path.Combine(uploadsFolder, uniqueFile);
+
+                using (var fs = new FileStream(filePath, FileMode.Create))
+                {
+                    await file.CopyToAsync(fs);
+                }
+
+                // Save document record
+                var doc = new UploadDocument
+                {
+                    ClaimID = claimId,               // FIXED: must be Id, not ClaimID
+                    FileName = file.FileName,
+                    FilePath = "/uploads/" + uniqueFile,
+                    UploadDate = DateTime.Now
+                };
+
+                _context.UploadDocuments.Add(doc);
                 await _context.SaveChangesAsync();
-                return RedirectToAction(nameof(Claims));
             }
 
-            return View(claim);
+            TempData["SuccessMessage"] = "Claim created successfully.";
+
+            // Redirect to list of docs for this claim
+            return RedirectToAction("List", "UploadDocument", new { claimId = claimId });
         }
 
+        // View one claim
         public async Task<IActionResult> ViewClaims(int id)
         {
-            var claim = await _context.Claims.FirstOrDefaultAsync(c => c.Id == id);
-            if (claim == null) return NotFound();
+            var claim = await _context.Claims
+                .Include(c => c.Documents)      // IMPORTANT: show files under that claim
+                .FirstOrDefaultAsync(c => c.Id == id);
+
+            if (claim == null)
+                return NotFound();
 
             return View(claim);
         }
 
+        // Approve claim
         [HttpPost]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Approve(int id)
@@ -90,9 +125,10 @@ namespace SystemClaim.Controllers
             claim.Status = "Approved";
             await _context.SaveChangesAsync();
 
-            return RedirectToAction("Claims"); // Or Dashboard
+            return RedirectToAction("Claims");
         }
 
+        // Reject claim
         [HttpPost]
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> Reject(int id, string reason)
@@ -103,11 +139,10 @@ namespace SystemClaim.Controllers
             claim.Status = "Rejected";
             claim.RejectReason = reason;
             claim.ReasonRequired = !string.IsNullOrEmpty(reason);
+
             await _context.SaveChangesAsync();
 
-            return RedirectToAction("Claims"); // Or Dashboard
+            return RedirectToAction("Claims");
         }
-
-
     }
 }
